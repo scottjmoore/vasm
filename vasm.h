@@ -28,8 +28,10 @@ typedef struct regsym regsym;
 #include "symtab.h"
 #include "expr.h"
 #include "parse.h"
+#include "source.h"
 #include "atom.h"
 #include "cond.h"
+#include "listing.h"
 #include "supp.h"
 
 #if defined(BIGENDIAN)&&!defined(LITTLEENDIAN)
@@ -46,6 +48,10 @@ typedef struct regsym regsym;
 
 #ifndef OPERAND_OPTIONAL
 #define OPERAND_OPTIONAL(p,t) 0
+#endif
+
+#ifndef IGNORE_FIRST_EXTRA_OP
+#define IGNORE_FIRST_EXTRA_OP 0
 #endif
 
 #ifndef START_PARENTH
@@ -70,71 +76,16 @@ typedef unsigned int bvtype;
 #define BCLR(array,bit) (array)[(bit)/BVBITS]&=~(1<<((bit)%BVBITS))
 #define BTST(array,bit) ((array)[(bit)/BVBITS]&(1<<((bit)%BVBITS)))
 
-
-/* include paths */
-struct include_path {
-  struct include_path *next;
-  char *path;
-  int compdir_based;
-};
-
-/* source files */
-struct source_file {
-  struct source_file *next;
-  struct include_path *incpath;
-  int index;
-  char *name;
-  char *text;
-  size_t size;
-};
-
-/* source texts (main file, include files or macros) */
-struct source {
-  struct source *parent;
-  int parent_line;
-  struct source_file *srcfile;
-  char *name;
-  char *text;
-  size_t size;
-  struct source *defsrc;
-  int defline;
-  macro *macro;
-  unsigned long repeat;
-  char *irpname;
-  struct macarg *irpvals;
-  int cond_level;
-  struct macarg *argnames;
-  int num_params;
-  char *param[MAXMACPARAMS+1];
-  int param_len[MAXMACPARAMS+1];
-#if MAX_QUALIFIERS > 0
-  int num_quals;
-  char *qual[MAX_QUALIFIERS];
-  int qual_len[MAX_QUALIFIERS];
-#endif
-  unsigned long id;
-  char *srcptr;
-  int line;
-  size_t bufsize;
-  char *linebuf;
-#ifdef CARGSYM
-  expr *cargexp;
-#endif
-#ifdef REPTNSYM
-  long reptn;
-#endif
-};
-
 /* section flags */
-#define HAS_SYMBOLS 1
-#define RESOLVE_WARN 2
-#define UNALLOCATED 4
-#define LABELS_ARE_LOCAL 8
-#define ABSOLUTE 16
-#define PREVABS 32          /* saved ABSOLUTE-flag during RORG-block */
-#define IN_RORG 64
-#define NEAR_ADDRESSING 128
-#define SECRSRVD (1L<<24)   /* bits 24..31 are reserved for output modules */
+#define HAS_SYMBOLS      (1<<0)
+#define RESOLVE_WARN     (1<<1)
+#define UNALLOCATED      (1<<2)
+#define LABELS_ARE_LOCAL (1<<3)
+#define ABSOLUTE         (1<<4)
+#define PREVABS          (1<<5) /* saved ABSOLUTE-flag during RORG-block */
+#define IN_RORG          (1<<6)       
+#define NEAR_ADDRESSING  (1<<7)
+#define SECRSRVD       (1L<<24) /* bits 24-31 are reserved for output modules */
 
 /* section description */
 struct section {
@@ -152,7 +103,6 @@ struct section {
   taddr org;
   taddr pc;
   unsigned long idx; /* usable by output module */
-  
 };
 
 /* mnemonic description */
@@ -169,26 +119,9 @@ typedef struct mnemonic {
 #define OPSZ_FLOAT      0x100  /* operand stored as floating point */
 #define OPSZ_SWAP	0x200  /* operand stored with swapped bytes */
 
-/* listing table */
 
-#define MAXLISTSRC 120
-
-struct listing {
-  listing *next;
-  source *src;
-  int line;
-  int error;
-  atom *atom;
-  section *sec;
-  taddr pc;
-  char txt[MAXLISTSRC];
-};
-
-
-extern listing *first_listing,*last_listing,*cur_listing;
 extern int done,final_pass,nostdout;
 extern int warn_unalloc_ini_dat;
-extern int listena,listformfeed,listlinesperpage,listnosyms;
 extern int mnemonic_cnt;
 extern int nocase,no_symbols,pic_check,exec_out,chklabels;
 extern int secname_attr,unnamed_sections;
@@ -198,7 +131,7 @@ extern source *cur_src;
 extern section *current_section;
 extern char *filename;
 extern char *debug_filename;  /* usually an absolute C source file name */
-extern char *inname,*outname,*listname,*compile_dir;
+extern char *inname,*outname;
 extern char *output_format;
 extern char emptystr[];
 extern char vasmsym_name[];
@@ -213,10 +146,6 @@ extern int debug;
 
 void leave(void);
 void set_default_output_format(char *);
-FILE *locate_file(char *,char *,struct include_path **);
-source *include_source(char *);
-source *new_source(char *,struct source_file *,char *,size_t);
-void end_source(source *);
 void set_section(section *);
 section *new_section(char *,char *,int);
 section *new_org(taddr);
@@ -225,6 +154,8 @@ void switch_section(char *,char *);
 void switch_offset_section(char *,taddr);
 void add_align(section *,taddr,expr *,int,unsigned char *);
 section *default_section(void);
+void push_section(void);
+section *pop_section(void);
 #if NOT_NEEDED
 section *restore_section(void);
 section *restore_org(void);
@@ -233,10 +164,6 @@ int end_rorg(void);
 void try_end_rorg(void);
 void start_rorg(taddr);
 void print_section(FILE *,section *);
-struct include_path *new_include_path(char *);
-void set_listing(int);
-void set_list_title(char *,int);
-void write_listing(char *);
 
 #define setfilename(x) filename=(x)
 #define getfilename() filename
@@ -256,6 +183,7 @@ void output_atom_error(int,atom *,...);
 void modify_gen_err(int,...);
 void modify_syntax_err(int,...);
 void modify_cpu_err(int,...);
+void disable_message(int);
 void disable_warning(int);
 
 #define ierror(x) general_error(4,(x),__LINE__,__FILE__)
@@ -273,10 +201,6 @@ int cpu_args(char *);
 char *parse_cpu_special(char *);
 operand *new_operand();
 int parse_operand(char *text,int len,operand *out,int requires);
-#define PO_SKIP 2
-#define PO_MATCH 1
-#define PO_NOMATCH 0
-#define PO_CORRUPT -1
 size_t instruction_size(instruction *,section *,taddr);
 dblock *eval_instruction(instruction *,section *,taddr);
 dblock *eval_data(operand *,size_t,section *,taddr);
@@ -306,7 +230,6 @@ void parse(void);
 char *parse_macro_arg(struct macro *,char *,struct namelen *,struct namelen *);
 int expand_macro(source *,char **,char *,int);
 char *skip(char *);
-char *skip_operand(char *);
 void eol(char *);
 char *const_prefix(char *,int *);
 char *const_suffix(char *,char *);
@@ -329,3 +252,5 @@ int init_output_hunk(char **,void (**)(FILE *,section *,symbol *),int (**)(char 
 int init_output_aout(char **,void (**)(FILE *,section *,symbol *),int (**)(char *));
 int init_output_tos(char **,void (**)(FILE *,section *,symbol *),int (**)(char *));
 int init_output_xfile(char **,void (**)(FILE *,section *,symbol *),int (**)(char *));
+int init_output_cdef(char **,void (**)(FILE *,section *,symbol *),int (**)(char *));
+int init_output_ihex(char **,void (**)(FILE *,section *,symbol *),int (**)(char *));

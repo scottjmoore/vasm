@@ -12,7 +12,7 @@
    be provided by the main module.
 */
 
-char *syntax_copyright="vasm motorola syntax module 3.14 (c) 2002-2020 Frank Wille";
+char *syntax_copyright="vasm motorola syntax module 3.14c (c) 2002-2020 Frank Wille";
 hashtable *dirhash;
 char commentchar = ';';
 
@@ -1036,6 +1036,17 @@ static void handle_debug(char *s)
 }
 
 
+static void handle_msource(char *s)
+{
+  if (!strnicmp(s,"on",2))
+    msource_disable = 0;
+  else if (!strnicmp(s,"off",3))
+    msource_disable = 1;
+  else
+    msource_disable = atoi(s) == 0;
+}
+
+
 static void handle_vdebug(char *s)
 {
   atom *a = new_atom(VASMDEBUG,0);
@@ -1367,6 +1378,18 @@ static void handle_ifle(char *s)
   ifexp(s,5);
 }
 
+static void handle_ifp1(char *s)
+{
+  cond_if(1);        /* vasm parses only once, so we assume true */
+  syntax_error(25);  /* and warn about it */
+}
+
+static void handle_ifp2(char *s)
+{
+  cond_if(0);        /* vasm parses only once, so we assume false */
+  syntax_error(26);  /* and warn about it */
+}
+
 static void handle_else(char *s)
 {
   cond_skipelse();
@@ -1612,6 +1635,18 @@ static void handle_einline(char *s)
     syntax_error(20);  /* einline without inline */
 }
 
+static void handle_pushsect(char *s)
+{
+  push_section();
+  eol(s);
+}
+
+static void handle_popsect(char *s)
+{
+  pop_section();
+  eol(s);
+}
+
 
 #define D 1 /* available for DevPac */
 #define P 2 /* available for PhxAss */
@@ -1723,6 +1758,7 @@ struct {
   "symdebug",P,eol,
   "dsource",P,handle_dsource,
   "debug",P,handle_debug,
+  "msource",0,handle_msource,
   "vdebug",0,handle_vdebug,
   "comment",P|D,handle_comment,
   "incdir",P|D,handle_incdir,
@@ -1753,6 +1789,9 @@ struct {
   "ifmi",0,handle_iflt,
   "ifpl",0,handle_ifge,
   "if",P,handle_ifne,
+  "ifp1",0,handle_ifp1,
+  "if1",0,handle_ifp1,
+  "if2",0,handle_ifp2,
   "else",P|D,handle_else,
   "elseif",P|D,handle_else,
   "endif",P|D,handle_endif,
@@ -1798,11 +1837,13 @@ struct {
   "struct",0,handle_struct,
   "estruct",0,handle_endstruct,
 #endif
+  "pushsection",0,handle_pushsect,
+  "popsection",0,handle_popsect,
 };
 #undef P
 #undef D
 
-int dir_cnt = sizeof(directives) / sizeof(directives[0]);
+size_t dir_cnt = sizeof(directives) / sizeof(directives[0]);
 
 
 /* checks for a valid directive, and return index when found, -1 otherwise */
@@ -1878,28 +1919,7 @@ static char *skip_local(char *p)
 }
 
 
-static char *parse_local_label(char **start)
-{
-  char *s = *start;
-  char *p = skip_local(s);
-  char *name = NULL;
-
-  if (p > (s+1)) {  /* identifier with at least 2 characters */
-    if (*s == local_char) {
-      /* .label */
-      name = make_local_label(NULL,0,s,p-s);
-      *start = p;
-    }
-    else if (*(p-1) == '$') {
-      /* label$ */
-      name = make_local_label(NULL,0,s,(p-1)-s);
-      *start = p;
-    }
-  }
-  return name;
-}
-
-
+#if STRUCT
 /* When a structure with this name exists, insert its atoms and either
    initialize with new values or accept its default values. */
 static int execute_struct(char *name,int name_len,char *s)
@@ -1999,6 +2019,7 @@ static int execute_struct(char *name,int name_len,char *s)
 
   return 1;
 }
+#endif
 
 
 void parse(void)
@@ -2008,7 +2029,7 @@ void parse(void)
   char *op[MAX_OPERANDS];
   int ext_len[MAX_QUALIFIERS?MAX_QUALIFIERS:1];
   int op_len[MAX_OPERANDS];
-  int i,ext_cnt,op_cnt,inst_len;
+  int ext_cnt,op_cnt,inst_len;
   instruction *ip;
 
   while (line = read_next_line()) {
@@ -2044,7 +2065,6 @@ void parse(void)
 
     if (labname = parse_labeldef(&s,0)) {
       /* we have found a global or local label */
-      int lablen = strlen(labname);
       uint32_t symflags = 0;
       symbol *label;
 
@@ -2194,6 +2214,7 @@ void parse(void)
 
 #if MAX_QUALIFIERS>0
     if (ip) {
+      int i;
       for (i=0; i<ext_cnt; i++)
         ip->qualifiers[i] = cnvstr(ext[i],ext_len[i]);
       for(; i<MAX_QUALIFIERS; i++)
@@ -2500,9 +2521,12 @@ char *get_local_label(char **start)
   if (p!=NULL && *p=='\\' && ISIDSTART(*s) && *s!=local_char && *(p-1)!='$') {
     /* skip local part of global\local label */
     s = p + 1;
-    p = skip_local(s);
-    name = make_local_label(*start,(s-1)-*start,s,*(p-1)=='$'?(p-1)-s:p-s);
-    *start = skip(p);
+    if (p = skip_local(s)) {
+      name = make_local_label(*start,(s-1)-*start,s,*(p-1)=='$'?(p-1)-s:p-s);
+      *start = skip(p);
+    }
+    else
+      return NULL;
   }
   else if (p!=NULL && p>(s+1)) {  /* identifier with at least 2 characters */
     if (*s == local_char) {
@@ -2521,7 +2545,7 @@ char *get_local_label(char **start)
 }
 
 
-int init_syntax()
+int init_syntax(void)
 {
   size_t i;
   symbol *sym;
@@ -2590,6 +2614,7 @@ int syntax_args(char *p)
     devpac_compat = 1;
     align_data = 1;
     esc_sequences = 0;
+    dot_idchar = 1;
     allmp = 1;
     warn_unalloc_ini_dat = 1;
     return 1;
